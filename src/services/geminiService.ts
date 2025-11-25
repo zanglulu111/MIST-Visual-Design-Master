@@ -1,101 +1,100 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { MasterPromptResult } from "../types";
 
-// 读取 Key，防崩处理
-const API_KEY = import.meta.env.VITE_GOOGLE_API_KEY || "";
+// NOTE: We do NOT import @google/genai here anymore. 
+// The client-side code interacts only with our own /api/generate endpoint.
 
-let genAI: GoogleGenerativeAI | null = null;
-if (API_KEY) {
-  genAI = new GoogleGenerativeAI(API_KEY);
-}
+const SYSTEM_INSTRUCTION = `
+Role: You are a world-class Midjourney Prompt Engineer and Visual Director.
 
-// --- 定义返回类型 ---
-export interface MasterPromptResult {
-  purist: string;
-  aesthete: string;
-  creative: string;
-}
+Input: A raw, potentially contradictory list of visual tags provided by a user (The "Raw Data").
+Task: Analyze the Raw Data and generate 3 distinct, high-quality Midjourney prompts based on the following strategies.
 
-// --- 视觉导演系统指令 (V2) ---
-const MASTER_SYSTEM_INSTRUCTION = `
-ROLE:
-You are a World-Class AI Visual Director and Prompt Engineer specialized in Midjourney V6.
+---
+STRATEGY 1: THE PURIST (Logical Fix / 逻辑修复)
+- Goal: Fix logic errors (e.g., conflicting subject types, impossible weather) while keeping as many user tags as possible.
+- Method:
+  1. Identify the Main Subject. If multiple conflicting species/genders exist, pick the most specific/interesting one (e.g., Orc > Human).
+  2. Consolidate Fashion/Attire into a coherent outfit.
+  3. Ensure Weather/Time physics make sense.
+  4. Structure: [Medium/Style] + [Subject description] + [Action/Pose] + [Environment/Props] + [Lighting/Atmosphere] + --v 6.0 --style raw
 
-TASK:
-Receive a raw list of visual tags (Raw Data).
-Generate 3 DISTINCT variations of Midjourney prompts based on the following strategies:
+STRATEGY 2: THE AESTHETE (Artistic Soul / 艺术升华)
+- Goal: Maximize the visual style defined in the "Layer 0" (Medium/Soul/Global) tags.
+- Method:
+  1. Prioritize Artist names, Art Movements, and Rendering Engines over literal object descriptions.
+  2. Rewrite the Subject and Scene to fit strictly within that art style (e.g., if "Ukiyo-e" is selected, the "Cyberpunk City" becomes "Edo-period Sci-fi woodblock print").
+  3. Use emotive, abstract adjectives.
 
-1. THE PURIST (Logical Fix):
-   - Focus: Logic and coherence.
-   - Action: Fix conflicting tags (e.g. "Robot" + "Ancient"). Prioritize the Subject.
-   - Tone: Clear, descriptive, high-fidelity.
+STRATEGY 3: THE STORYTELLER (Cinematic / 叙事重构)
+- Goal: Create a dramatic, cohesive scene focusing on mood and lighting.
+- Method:
+  1. Focus on the "Action", "Expression", and "Gaze".
+  2. Describe the interaction between the Subject and the Environment.
+  3. Use lighting (Volumetric, Rim, etc.) to glue the scene together.
+  4. Discard minor details that clutter the composition.
+  5. Create a specific "moment in time".
 
-2. THE AESTHETE (Artistic Soul):
-   - Focus: Style and Atmosphere.
-   - Action: Weave the "Visual Soul" (Director style) into the lighting and mood.
-   - Tone: Poetic, cinematic, evocative.
+---
+TRANSLATION REQUIREMENT:
+For each prompt, provide a "translation" field in CHINESE (Simplified).
+This translation should not just be a literal translation, but an explanation of the visual intent suitable for a Chinese user to understand the scene.
 
-3. THE CREATIVE (Wild Card):
-   - Focus: Narrative and Drama.
-   - Action: Add a specific, unprompted detail (a prop, a background event) that tells a story.
-   - Tone: Dramatic, dynamic.
-
-OUTPUT FORMAT:
-Return a JSON object strictly. Do not use Markdown code blocks.
-{
-  "purist": "string...",
-  "aesthete": "string...",
-  "creative": "string..."
-}
+Constraint:
+- Output strictly in JSON format.
+- The 'prompt' field must be English.
+- The 'translation' field must be Chinese.
 `;
 
-// --- 核心函数：生成三套方案 ---
-// ⚠️ 这就是报错说缺失的那个函数！
-export async function generateMasterPrompts(rawPrompt: string): Promise<MasterPromptResult> {
-  
-  // 1. 检查 Key
-  if (!API_KEY || !genAI) {
-    console.error("❌ API Key 缺失");
-    return {
-      purist: "Error: API Key missing. Check .env file.",
-      aesthete: "Error: API Key missing.",
-      creative: "Error: API Key missing."
-    };
+// Helper for retry delay
+const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+export const generateMasterPrompts = async (rawPrompt: string): Promise<MasterPromptResult> => {
+  let lastError: any;
+  const maxRetries = 3;
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      // Fetch from our own Vercel API route (proxies to Google)
+      const response = await fetch('/api/generate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          prompt: rawPrompt,
+          systemInstruction: SYSTEM_INSTRUCTION
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || `Server error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      return data as MasterPromptResult;
+
+    } catch (error: any) {
+      lastError = error;
+      console.warn(`Attempt ${attempt + 1} failed:`, error.message);
+
+      // Retry on network errors or specific server errors
+      const isRetryable = 
+        !error.message || 
+        error.message.includes('504') || 
+        error.message.includes('503') ||
+        error.message.includes('429');
+
+      if (isRetryable && attempt < maxRetries - 1) {
+        const delay = Math.pow(2, attempt) * 1000 + (Math.random() * 500);
+        await wait(delay);
+        continue;
+      }
+      
+      break;
+    }
   }
 
-  try {
-    // 2. 调用模型 (使用 json 模式确保格式正确)
-    const model = genAI.getGenerativeModel({ 
-      model: "gemini-2.5-flash", 
-      systemInstruction: MASTER_SYSTEM_INSTRUCTION,
-      generationConfig: { responseMimeType: "application/json" }
-    });
-
-    const result = await model.generateContent(`RAW DATA:\n${rawPrompt}`);
-    const response = result.response;
-    const text = response.text();
-
-    // 3. 解析 JSON
-    const data = JSON.parse(text);
-    
-    // 4. 返回结果
-    return {
-      purist: data.purist || "Generation failed",
-      aesthete: data.aesthete || "Generation failed",
-      creative: data.creative || "Generation failed"
-    };
-
-  } catch (error) {
-    console.error("Gemini Request Failed:", error);
-    return {
-      purist: "AI connection failed.",
-      aesthete: "Please check your network.",
-      creative: "Or check your API Key quota."
-    };
-  }
-}
-
-// --- 旧函数兼容 (如果别的地方还在用) ---
-export async function enhancePromptWithGemini(rawPrompt: string): Promise<string> {
-  const res = await generateMasterPrompts(rawPrompt);
-  return res.aesthete; // 默认返回艺术版
-}
+  console.error("AI Generation Fatal Error:", lastError);
+  throw lastError;
+};
