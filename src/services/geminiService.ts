@@ -65,7 +65,7 @@ export async function generateMasterPrompts(rawPrompt: string): Promise<MasterPr
   try {
     // 2. 调用模型 (使用 json 模式确保格式正确)
     const model = genAI.getGenerativeModel({ 
-      model: "gemini-1.5-pro-latest", 
+      model: "gemini-3-pro-preview", 
       systemInstruction: MASTER_SYSTEM_INSTRUCTION,
       generationConfig: { responseMimeType: "application/json" }
     });
